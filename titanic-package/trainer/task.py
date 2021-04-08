@@ -9,70 +9,50 @@ AIP_TEST_DATA_URI : Sharded exported test data uris. destination can be only one
 
 
 """
-
-import dask.dataframe as dd
-from google.cloud import bigquery, bigquery_storage
+from google.cloud import bigquery, bigquery_storage, storage
 from sklearn.pipeline import make_pipeline, Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, OrdinalEncoder
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.model_selection import cross_val_score
 from sklearn.svm import SVC
 from sklearn.metrics import classification_report, f1_score
-import pickle
-from google.cloud import storage
-from datetime import datetime
-import os
-import pandas as pd
-import logging
-import numpy as np
 from typing import Union, List
-import json
+import os, logging, json, pickle, argparse
+import dask.dataframe as dd
+import pandas as pd
+import numpy as np
 
-# Helps parsing input arguments
-import argparse
-import hypertune
+# feature selection.  The FEATURE list defines what features are needed from the training data.
+# as well as the types of those features. We will perform different feature engineering depending on the type
 
-# feature categories
-
-# List all binary features: 0,1 or True,Fales or Male,Female etc
+# List all column names for binary features: 0,1 or True,False or Male,Female etc
 BINARY_FEATURES = [
-    'gender',
-    'SeniorCitizen',
-    'Partner',
-    'Dependents',
-    'PhoneService',
-    'PaperlessBilling']
+    'sex']
 
-# List all numeric features
+# List all column names for numeric features
 NUMERIC_FEATURES = [
-    'tenure',
-    'MonthlyCharges',
-    'TotalCharges']
+    'age',
+    'fare']
 
-# List all categorical features 
+# List all column names for categorical features 
 CATEGORICAL_FEATURES = [
-    'InternetService',
-    'OnlineSecurity',
-    'DeviceProtection',
-    'TechSupport',
-    'StreamingTV',
-    'StreamingMovies',
-    'Contract',
-    'PaymentMethod',
-    'MultipleLines']
+    'pclass',
+    'embarked',
+    'home_dest',
+    'parch',
+    'sibsp']
 
 ALL_COLUMNS = BINARY_FEATURES+NUMERIC_FEATURES+CATEGORICAL_FEATURES
 
-LABEL = 'Churn'
+# define the column name for label
+LABEL = 'survived'
 
-# We define the index position of each feature. This will be needed when we wil be processing a 
-# numpy array (instead of pandas) that has no column names.
+# Define the index position of each feature. This is needed for processing a 
+# numpy array (instead of pandas) which has no column names.
 BINARY_FEATURES_IDX = list(range(0,len(BINARY_FEATURES)))
 NUMERIC_FEATURES_IDX = list(range(len(BINARY_FEATURES), len(BINARY_FEATURES)+len(NUMERIC_FEATURES)))
 CATEGORICAL_FEATURES_IDX = list(range(len(BINARY_FEATURES+NUMERIC_FEATURES), len(ALL_COLUMNS)))
 
-
-# TODO: From the experiment.ipynb copy-paste the load_data_from_gcs function
 
 def load_data_from_gcs(data_gcs_path: str) -> pd.DataFrame:
     '''
@@ -93,7 +73,6 @@ def load_data_from_gcs(data_gcs_path: str) -> pd.DataFrame:
     return dd.read_csv(data_gcs_path, dtype={'TotalCharges': 'object'}).compute()
 
 
-# TODO: From the experiment.ipynb copy-paste the load_data_from_bq function 
 def load_data_from_bq(bq_uri: str) -> pd.DataFrame:
     '''
     Loads data from BigQuery table (BQ) to a dataframe
@@ -119,23 +98,27 @@ def load_data_from_bq(bq_uri: str) -> pd.DataFrame:
         .to_dataframe(bqstorage_client=bqstorageclient)
     )
 
-# TODO: From the experiment.ipynb copy-paste the sort_missing_total_charges function 
-def sort_missing_total_charges(df: pd.DataFrame):
+def clean_missing_numerics(df: pd.DataFrame, numeric_columns):
     '''
-    Alters the received dataframe and sets missing TotalChanges 
-    equal to MonthlyCharges when tenure is 0.
+    removes invalid values in the numeric columns        
 
             Parameters:
-                    df (pandas.DataFrame): The Pandas Dataframe to alter
+                    df (pandas.DataFrame): The Pandas Dataframe to alter 
+                    numeric_columns (List[str]): List of column names that are numberic from the DataFrame
             Returns:
-                    None
+                    pandas.DataFrame: a dataframe with the numeric columns fixed
     '''
-    df.loc[df.tenure == 0, 'TotalCharges'] = df.loc[df.tenure == 0, 'MonthlyCharges']
     
-# TODO: From the experiment.ipynb copy-paste the data_selection function
+    for n in numeric_columns:
+        df[n] = pd.to_numeric(df[n], errors='coerce')
+        
+    df = df.fillna(df.mean())
+         
+    return df
+    
 def data_selection(df: pd.DataFrame, selected_columns: List[str], label_column: str) -> (pd.DataFrame, pd.Series):
     '''
-    From a dataframe create a new dataframe with only selected columns and returns it.
+    From a dataframe it creates a new dataframe with only selected columns and returns it.
     Additionally it splits the label column into a pandas Series.
 
             Parameters:
@@ -154,7 +137,6 @@ def data_selection(df: pd.DataFrame, selected_columns: List[str], label_column: 
 
     return data, labels
 
-# TODO: From the experiment.ipynb copy-paste the pipeline_builder function 
 def pipeline_builder(params_svm: dict, bin_ftr_idx: List[int], num_ftr_idx: List[int], cat_ftr_idx: List[int]) -> Pipeline:
     '''
     Builds a sklearn pipeline with preprocessing and model configuration.
@@ -193,7 +175,6 @@ def pipeline_builder(params_svm: dict, bin_ftr_idx: List[int], num_ftr_idx: List
     return Pipeline(steps=[ ('preprocessor', preprocessor),
                           ('classifier', clf)])
 
-# TODO: From the experiment.ipynb copy-paste the train_pipeline function 
 def train_pipeline(clf: Pipeline, X: Union[pd.DataFrame, np.ndarray], y: Union[pd.DataFrame, np.ndarray]) -> float:
     '''
     Trains a sklearn pipeline by fiting training data an labels and returns the accuracy f1 score
@@ -209,15 +190,14 @@ def train_pipeline(clf: Pipeline, X: Union[pd.DataFrame, np.ndarray], y: Union[p
     # run cross validation to get training score. we can use this score to optimise training
     score = cross_val_score(clf, X, y, cv=10, n_jobs=-1).mean()
     
-    # Now we fit all our data to the classifier. Shame to leave a portion of the data behind
+    # Now we fit all our data to the classifier. 
     clf.fit(X, y)
     
     return score
 
-# TODO: From the experiment.ipynb copy-paste the process_gcs_uri function 
 def process_gcs_uri(uri: str) -> (str, str, str, str):
     '''
-    Receives a Google Cloud Storage (GCS) uri and breaks it down to the sheme, bucket, path and file
+    Receives a Google Cloud Storage (GCS) uri and breaks it down to the scheme, bucket, path and file
     
             Parameters:
                     uri (str): GCS uri
@@ -240,7 +220,6 @@ def process_gcs_uri(uri: str) -> (str, str, str, str):
     
     return scheme, bucket, path, file
 
-# TODO: From the experiment.ipynb copy-paste the pipeline_export_gcs function
 def pipeline_export_gcs(fitted_pipeline: Pipeline, model_dir: str) -> str:
     '''
     Exports trained pipeline to GCS
@@ -263,10 +242,10 @@ def pipeline_export_gcs(fitted_pipeline: Pipeline, model_dir: str) -> str:
     blob.upload_from_string(pickle.dumps(fitted_pipeline))
     return scheme + "//" + os.path.join(bucket, export_path)
 
-# TODO: From the experiment.ipynb copy-paste the prepare_report function 
+
 def prepare_report(cv_score: float, model_params: dict, classification_report: str, columns: List[str], example_data: np.ndarray) -> str:
     '''
-    Prepares a training job repor in Text
+    Prepares a training report in Text
     
             Parameters:
                     cv_score (float): score of the training job during cross validation of training data
@@ -323,7 +302,7 @@ Example of GCP API request body:
     
     return report
 
-# TODO: From the experiment.ipynb copy-paste the report_export_gcs function
+
 def report_export_gcs(report: str, report_dir: str) -> None:
     '''
     Exports training job report to GCS
@@ -341,7 +320,7 @@ def report_export_gcs(report: str, report_dir: str) -> None:
     # Upload the model to GCS
     b = storage.Client().bucket(bucket)
     
-    export_path = os.path.join(path, 'report.pkl')
+    export_path = os.path.join(path, 'report.txt')
     blob = b.blob(export_path)
     
     blob.upload_from_string(report)
@@ -379,7 +358,22 @@ if __name__ == '__main__':
     )
 
     
+    ''' 
+    AI Platform automatically populates a set of environment varialbes in the container that executes 
+    your training job. those variables include:
+        * AIP_MODEL_DIR - Directory selected as model dir
+        * AIP_DATA_FORMAT - Type of dataset selected for training (can be csv or bigquery)
     
+    AI platform will automatically split selected dataset into training,validation and testing
+    and 3 more environment variables will reflect the locaiton of the data:
+        * AIP_TRAINING_DATA_URI - URI of Training data
+        * AIP_VALIDATION_DATA_URI - URI of Validation data
+        * AIP_TEST_DATA_URI - URI of Test data
+        
+    Notice that those environment varialbes are default. If the user provides a value using CLI argument,
+    the environment variable will be ignored. If the user does not provide anything as CLI  argument
+    the program will try and use the environemnt variables if those exist. otherwise will leave empty.
+    '''   
     parser.add_argument(
         '--model_dir',
         help = 'Directory to output model and artifacts',
@@ -424,9 +418,6 @@ if __name__ == '__main__':
     if args.verbose:
         logging.basicConfig(level=logging.INFO)
         
-    
-    #for k,v in os.environ.items():
-    #    logging.info(print(k,"=",v))
         
     logging.info('Model artifacts will be exported here: {}'.format(arguments['model_dir']))
     logging.info('Data format: {}'.format(arguments["data_format"]))
@@ -435,31 +426,41 @@ if __name__ == '__main__':
     logging.info('Test data uri: {}'.format(arguments['test_data_uri']))
     
     
+    '''
+    We have 2 different ways to load our data to pandas. One is from cloud storage by loading csv files and
+    the other is by connecting to BigQuery. Unified AI Platform supports both and 
+    here we created a code that depelnding on the dataset provided, we will select the appropriated loading method.
+    '''
     logging.info('Loading {} data'.format(arguments["data_format"]))
     if(arguments['data_format']=='csv'):
         df_train = load_data_from_gcs(arguments['training_data_uri'])
+        df_test = load_data_from_bq(arguments['test_data_uri'])
         df_valid = load_data_from_gcs(arguments['validation_data_uri'])
     elif(arguments['data_format']=='bigquery'):
         print(arguments['training_data_uri'])
         df_train = load_data_from_bq(arguments['training_data_uri'])
+        df_test = load_data_from_bq(arguments['test_data_uri'])
         df_valid = load_data_from_bq(arguments['validation_data_uri'])
     else:
         raise ValueError("Invalid data type ")
         
+    #as we will be using cross validation, we will have just a training set and a single test set.
+    # we ill merge the test and validation to achieve an 80%-20% split
+    df_test = pd.concat([df_test,df_valid])
     
     logging.info('Defining model parameters')    
     model_params = dict()
     model_params['kernel'] = arguments['model_param_kernel']
     model_params['degree'] = arguments['model_param_degree']
     model_params['C'] = arguments['model_param_C']
-
-    sort_missing_total_charges(df_train)
-    sort_missing_total_charges(df_valid)
-
     
+    df_train = clean_missing_numerics(df_train, NUMERIC_FEATURES)
+    df_test = clean_missing_numerics(df_test, NUMERIC_FEATURES)
+    
+
     logging.info('Running feature selection')    
     X_train, y_train = data_selection(df_train, ALL_COLUMNS, LABEL)
-    X_test, y_test = data_selection(df_valid, ALL_COLUMNS, LABEL)
+    X_test, y_test = data_selection(df_test, ALL_COLUMNS, LABEL)
 
     logging.info('Training pipelines in CV')   
     clf = pipeline_builder(model_params, BINARY_FEATURES_IDX, NUMERIC_FEATURES_IDX, CATEGORICAL_FEATURES_IDX)
@@ -476,11 +477,6 @@ if __name__ == '__main__':
     
     test_score = f1_score(y_test, y_pred, average='weighted')
     
-    hpt = hypertune.HyperTune()
-    hpt.report_hyperparameter_tuning_metric(
-    hyperparameter_metric_tag='f1score',
-    metric_value=test_score)
-    
     
     logging.info('f1score: '+ str(test_score))    
     
@@ -493,4 +489,4 @@ if __name__ == '__main__':
     report_export_gcs(report, arguments['model_dir'])
     
     
-    logging.info('Train completed. Exiting...')
+    logging.info('Training job completed. Exiting...')
